@@ -22,7 +22,7 @@ from src.report import build_docx_report, build_markdown_report, save_analysis
 from src.similarity import build_similarity_matrix, similarity_level_ko
 
 
-st.set_page_config(page_title="특허 검토 Agent", layout="wide")
+st.set_page_config(page_title="특허 검토 Agent", layout="wide", initial_sidebar_state="collapsed")
 ensure_directories()
 
 
@@ -263,26 +263,33 @@ def run_analysis(inputs: list[PatentInput], mode: AnalysisMode, max_input_chars:
         except Exception as exc:
             st.error(f"{item.label} 처리 실패: {exc}")
 
-    progress.progress(1.0, text="분석 완료")
     st.session_state["last_documents"] = documents
     st.session_state["last_analyses"] = analyses
     st.session_state["last_mode"] = mode
     st.session_state["report_timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
     st.session_state["multi_comparisons"] = {}
     if len(analyses) >= 2:
+        progress.progress(0.95, text="전체 비교 요약 생성 중")
         matrix = build_similarity_matrix(analyses)
         st.session_state["batch_matrix"] = matrix
         st.session_state["batch_summary"] = llm_client.summarize_batch(analyses, matrix)
     else:
         st.session_state.pop("batch_matrix", None)
         st.session_state.pop("batch_summary", None)
+    progress.progress(1.0, text="분석 완료")
 
 
-def render_results(documents: list[PatentDocument], analyses, mode: AnalysisMode, analysis_goals, llm_client: LlmClient) -> None:
+def render_results(
+    tabs,
+    documents: list[PatentDocument],
+    analyses,
+    mode: AnalysisMode,
+    analysis_goals,
+    llm_client: LlmClient,
+) -> None:
     if not analyses:
         return
 
-    tabs = st.tabs(["📝 요약", "🔬 특허 분석", "📊 복수 비교", "📤 내보내기"])
     with tabs[0]:
         st.dataframe(
             pd.DataFrame(build_patent_display_rows(documents, analyses)),
@@ -347,6 +354,7 @@ def render_results(documents: list[PatentDocument], analyses, mode: AnalysisMode
                 file_name=f"patent_review_report_{timestamp}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 key="download_docx",
+                on_click="ignore",
             )
         with col2:
             st.download_button(
@@ -355,8 +363,8 @@ def render_results(documents: list[PatentDocument], analyses, mode: AnalysisMode
                 file_name=f"patent_review_report_{timestamp}.md",
                 mime="text/markdown",
                 key="download_md",
+                on_click="ignore",
             )
-        st.caption("파일은 웹브라우저의 기본 다운로드 폴더에 저장됩니다.")
 
 
 def main() -> None:
@@ -380,29 +388,45 @@ def main() -> None:
     depth = st.sidebar.radio("분석 깊이", ["빠른 검토", "표준 검토", "정밀 검토"], index=1)
     render_ai_status(llm_client)
 
-    inputs = collect_inputs()
-    mode = AnalysisMode.batch if len(inputs) >= 2 else AnalysisMode.single
-
-    if inputs:
-        st.write(f"📥 입력 {len(inputs)}건 감지: **{'복수 특허 분석' if mode == AnalysisMode.batch else '단일 특허 분석'}**")
-        st.dataframe(
-            pd.DataFrame([{"종류": item.kind.value, "입력": item.label} for item in inputs]),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    if st.button("🚀 분석 시작", type="primary"):
-        if not inputs:
-            st.warning("분석할 PDF, 특허번호 또는 URL을 먼저 입력해 주세요.")
-            st.stop()
-        max_input_chars = depth_to_max_input_chars(depth, settings.gemma_max_input_chars)
-        run_analysis(inputs, mode, max_input_chars, llm_client)
-
     documents = st.session_state.get("last_documents", [])
     analyses = st.session_state.get("last_analyses", [])
-    last_mode = st.session_state.get("last_mode", mode)
+    tab_labels = ["📥 입력", "📝 요약", "🔬 특허 분석", "📊 복수 비교", "📤 내보내기"]
+    active_tab = st.session_state.get("active_tab", "📥 입력")
+    if active_tab not in tab_labels:
+        active_tab = "📥 입력"
+    tabs = st.tabs(tab_labels, default=active_tab)
+
+    with tabs[0]:
+        inputs = collect_inputs()
+        mode = AnalysisMode.batch if len(inputs) >= 2 else AnalysisMode.single
+        if inputs:
+            st.write(
+                f"📥 입력 {len(inputs)}건 감지: "
+                f"**{'복수 특허 분석' if mode == AnalysisMode.batch else '단일 특허 분석'}**"
+            )
+            st.dataframe(
+                pd.DataFrame([{"종류": item.kind.value, "입력": item.label} for item in inputs]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        if st.button("🚀 분석 시작", type="primary"):
+            if not inputs:
+                st.warning("분석할 PDF, 특허번호 또는 URL을 먼저 입력해 주세요.")
+                st.stop()
+            max_input_chars = depth_to_max_input_chars(depth, settings.gemma_max_input_chars)
+            run_analysis(inputs, mode, max_input_chars, llm_client)
+            if st.session_state.get("last_analyses"):
+                st.session_state["active_tab"] = "📝 요약"
+                st.rerun()
+
+    last_mode = st.session_state.get("last_mode", AnalysisMode.single)
     if documents and analyses:
-        render_results(documents, analyses, last_mode, analysis_goals, llm_client)
+        render_results(tabs[1:], documents, analyses, last_mode, analysis_goals, llm_client)
+    else:
+        for tab in tabs[1:]:
+            with tab:
+                st.info("입력 탭에서 특허를 입력하고 분석을 시작해 주세요.")
 
 
 if __name__ == "__main__":
